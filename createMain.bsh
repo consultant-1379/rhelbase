@@ -1,0 +1,311 @@
+#!/bin/bash
+# **********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# **********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2016 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property of
+# Ericsson Radio Systems AB, Sweden. The programs may be used and/or
+# copied only with the written permission from Ericsson Radio Systems AB
+# or in accordance with the terms and conditions stipulated in the
+# agreement/contract under which the program(s) have been supplied.
+#
+# **********************************************************************
+# Name    : createBaseImageFromIso.bsh
+# Date    : 15/01/2016
+# Revision: R1A01
+# Purpose : Create a docker image based on a RHEL ISO
+#
+# Usage   : createBaseImageFromIso.bsh <The Name of the image> <the reporisity file pointing to the updates to be applied to the OS> <The location of the ISO to be used to create the docker image> <The name of the ISO to be used to create the docker image>
+# Exampl  : createBaseImageFromIso.bsh test eric_rhel_server_7.repo https://yum.linux.ericsson.se/iso/rhel-server-7.2 rhel-server-7.2-x86_64-dvd.iso
+#
+# **********************************************************************
+#
+#   Command Section
+#
+# **********************************************************************
+
+
+# ********************************************************************
+#
+#   Main body of program
+#
+# ********************************************************************
+#
+
+set -x
+
+AWK=/usr/bin/awk
+DATE=/usr/bin/date
+DOCKER=/usr/bin/docker
+ECHO=/bin/echo
+GREP=/usr/bin/grep
+MOUNT=/bin/mount
+MKDIR=/usr/bin/mkdir
+TEE=/usr/bin/tee
+TOUCH=/usr/bin/touch
+WGET=/usr/bin/wget
+YUM=/usr/bin/yum
+
+RUN_TIME=`$DATE +%Y-%b-%d_%H.%M.%S`
+
+IMAGE_ID=""
+
+ERIC_REPO_FILE=""
+IMAGE_NAME=""
+ISO_HTTP_LOCATION=""
+ISO_NAME=""
+WORKSPACE=""
+
+LOGFILE=dockerImageCreate.log
+ISO_LOCATION=/tmp/rhel_iso
+MNT_LOCATION=/mnt/rhel_iso
+MEDIA_ID=""
+LOCAL_REPO_FILE=local.repo
+DISCINFO_FILE=.discinfo
+REPO_NAME=local_repo
+DOCKER_PREFIX=armdocker.rnd.ericsson.se/aia/base/
+
+CONTAINER_NAME="rhelimage"
+CONTAINER_ID=""
+ORIGINAL_IMAGE_ID=""
+DOCKER_CONFIG_LOCATION=/root/.docker/
+
+$TOUCH ${LOGFILE}
+if [ $? -ne 0 ]; then
+    _err_msg_="Could not create a logfile ${LOGFILE}"
+    abort_script "$_err_msg_"
+fi
+
+$ECHO "${RUN_TIME} :- Creating Docker Image from ISO" | $TEE -a ${LOGFILE}
+
+cashRepoLocally(){
+	
+	if [ ! -s ${ISO_LOCATION} ]; then
+       $MKDIR -p ${ISO_LOCATION}
+		if [ $? -ne 0 ]; then
+			_err_msg_="Could not create directory ${LOGFILE}"
+			abort_script "$_err_msg_"
+		fi
+    fi
+	
+	if [ ! -s ${ISO_LOCATION}/${ISO_NAME} ]; then	
+		${WGET} --no-check-certificate  ${ISO_HTTP_LOCATION}/${ISO_NAME} -P ${ISO_LOCATION}
+			if [ $? -ne 0 ]; then
+			_err_msg_="Could not get the iso from ${ISO_HTTP_LOCATION}"
+			abort_script "$_err_msg_"
+		fi
+	fi
+	
+	if [ ! -s ${ISO_LOCATION}/${ISO_NAME} ]; then
+        _err_msg_="No iso file found in ${ISO_LOCATION} please confirm wget output"
+        abort_script "$_err_msg_"
+    fi
+	
+}
+
+mountIso(){
+	
+	$MKDIR -p ${MNT_LOCATION}
+    if [ $? -ne 0 ]; then
+        _err_msg_="Could not create directory ${MNT_LOCATION}"
+        abort_script "$_err_msg_"
+    fi
+
+	if [ ! -s ${MNT_LOCATION}/${DISCINFO_FILE} ]; then	
+		sudo $MOUNT ${ISO_LOCATION}/${ISO_NAME} ${MNT_LOCATION}
+		if [ $? -ne 0 ]; then
+			_err_msg_="Failed to mount ${ISO_LOCATION}/$ISO_NAME to ${MNT_LOCATION}"
+			abort_script "$_err_msg_"
+		fi
+	fi
+
+    if [ ! -s ${MNT_LOCATION}/${DISCINFO_FILE} ]; then
+        _err_msg_="No discinfo file found in ${MOUNT_LOCATION}"
+        abort_script "$_err_msg_"
+    fi
+
+    MEDIA_ID=`head -n1 ${MNT_LOCATION}/${DISCINFO_FILE}`
+    if [ ! "${MEDIA_ID}" ]; then
+        _err_msg_="Failed to collect media id from ${MNT_LOCATION}/${DISCINFO_FILE}"
+        abort_script "$_err_msg_"
+    fi
+
+}
+
+createLocalRepo(){
+    
+	$ECHO -e "[${REPO_NAME}] \nmediaid=${MEDIA_ID} \nname=${REPO_NAME} \nbaseurl=file://${MNT_LOCATION} \ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release \nenabled=1 \ngpgcheck=1 \n" > ${LOCAL_REPO_FILE}
+	if [ $? -ne 0 ]; then
+        _err_msg_="Could not create the local repo file ${LOCAL_REPO_FILE}"
+        abort_script "$_err_msg_"
+    fi	
+	
+    if [ ! -s ${LOCAL_REPO_FILE} ]; then
+        _err_msg_="local repo file ${LOCAL_REPO_FILE} not found "
+        abort_script "$_err_msg_"
+    fi
+	
+	sudo cp ${LOCAL_REPO_FILE} /etc/yum.repos.d/
+	if [ $? -ne 0 ]; then
+        _err_msg_="Could not copy the locallocal repo file ${LOCAL_REPO_FILE} to /etc/yum.repos.d/"
+        abort_script "$_err_msg_"
+    fi	
+
+}
+
+createDockerImage(){
+	./create_docker_image_from_local_install.bsh ${IMAGE_NAME} ${REPO_NAME}
+}
+
+dockerUpdate(){
+
+	IMAGE_ID=`$DOCKER images | $GREP "^${IMAGE_NAME} " | $AWK -F" " '{print $3}'`
+	if [ $? -ne 0 ]; then
+        _err_msg_="Failed to get image ID for ${IMAGE_NAME}"
+        abort_script "$_err_msg_"
+    fi
+	$ECHO -e "FROM ${IMAGE_ID} \nADD ${ERIC_REPO_FILE} /etc/yum.repos.d/ \nRUN yum -y update \nRUN yum --enablerepo=* clean all" > Dockerfile
+
+	$DOCKER build -t ${DOCKER_PREFIX}${IMAGE_NAME} .
+	if [ $? -ne 0 ]; then
+        _err_msg_="Could not update the base image"
+        abort_script "$_err_msg_"
+    fi
+}
+
+shrinkImage(){
+    
+    ORIGINAL_IMAGE_ID=`$DOCKER images | $GREP "${DOCKER_PREFIX}${IMAGE_NAME} " | $AWK '{print $3}'`
+	if [ $? -ne 0 ]; then
+        _err_msg_="Failed to get image ID for ${DOCKER_PREFIX}rhel"
+        abort_script "$_err_msg_"
+    fi
+    
+    $DOCKER run --name=${CONTAINER_NAME} -ti -d $ORIGINAL_IMAGE_ID /bin/bash
+    if [ $? -ne 0 ]; then
+        _err_msg_="Could not create container for ${DOCKER_PREFIX}${IMAGE_NAME}"
+        abort_script "$_err_msg_"
+    fi
+    
+    CONTAINER_ID=`$DOCKER ps | $GREP ${CONTAINER_NAME} | $AWK '{print $1}'`
+    if [ $? -ne 0 ]; then
+        _err_msg_="Failed to get container ID for ${CONTAINER_NAME}"
+        abort_script "$_err_msg_"
+    fi
+    
+    $DOCKER export $CONTAINER_ID > /tmp/exportedrhelcontainer.tar
+    if [ $? -ne 0 ]; then
+        _err_msg_="Could not export container to tar for image ${DOCKER_PREFIX}${IMAGE_NAME}"
+        abort_script "$_err_msg_"
+    fi
+    
+    cat /tmp/exportedrhelcontainer.tar | $DOCKER import - ${DOCKER_PREFIX}rhel:latest
+    if [ $? -ne 0 ]; then
+        _err_msg_="Could not import exportedrhelcontainer.tar"
+        abort_script "$_err_msg_"
+    fi
+    
+    $DOCKER stop $CONTAINER_ID
+    if [ $? -ne 0 ]; then
+        _err_msg_="Failed to stop container: $CONTAINER_ID"
+        abort_script "$_err_msg_"
+    fi
+    
+    $DOCKER rm $CONTAINER_ID
+    if [ $? -ne 0 ]; then
+        _err_msg_="Failed to remove container: $CONTAINER_ID"
+        abort_script "$_err_msg_"
+    fi
+    
+    $DOCKER rmi $ORIGINAL_IMAGE_ID
+    if [ $? -ne 0 ]; then
+        _err_msg_="Failed to remove image: $ORIGINAL_IMAGE_ID"
+        abort_script "$_err_msg_"
+    fi
+    
+    rm -f /tmp/exportedrhelcontainer.tar
+    if [ $? -ne 0 ]; then
+        _err_msg_="Failed to remove file: /tmp/exportedrhelcontainer.tar"
+        abort_script "$_err_msg_"
+    fi
+}
+
+### Function: abort_script ###
+# Arguments:
+#       $1 - Error message from part of program (Not always used)
+# Return Values:
+#       none
+abort_script()
+{
+  _err_time_=`$DATE '+%Y-%b-%d_%H.%M.%S'`
+
+  if [ "$1" ]; then
+    _err_msg_="${_err_time_} - $1"
+  else
+    _err_msg_="${_err_time_} - ERROR : Script aborted......."
+  fi
+
+  if [ "${LOGFILE}" ]; then
+    $ECHO -e "ERROR : $_err_msg_" | $TEE -a ${LOGFILE}
+  else
+    $ECHO -e "ERROR : $_err_msg_"
+  fi
+
+  if [ "$2" ]; then
+    if [ ! "${UPGRADE}" -a ! "${RESTORE}" ]; then
+      ${2}
+    fi
+    exit 1
+  else
+    exit 1
+  fi
+}
+
+USAGE="createBaseImageFromIso.bsh <The Name of the image> <the reporisity file pointing to the updates to be applied to the OS> <The location of the ISO to be used to create the docker image> <The name of the ISO to be used to create the docker image>"
+
+IMAGE_NAME=$1
+if [ -z "${IMAGE_NAME}" ]; then
+	_err_msg_="${USAGE}"
+    abort_script "$_err_msg_"
+fi
+ERIC_REPO_FILE=$2
+if [ -z "${ERIC_REPO_FILE}" ]; then
+	_err_msg_="${USAGE}"
+    abort_script "$_err_msg_"
+fi
+ISO_HTTP_LOCATION=$3
+if [ -z "${ISO_HTTP_LOCATION}" ]; then
+	_err_msg_="${USAGE}"
+    abort_script "$_err_msg_"
+fi
+ISO_NAME=$4
+if [ -z "${ISO_NAME}" ]; then
+	_err_msg_="${USAGE}"
+    abort_script "$_err_msg_"
+fi
+WORKSPACE=$5
+if [ -z "${WORKSPACE}" ]; then
+	_err_msg_="${USAGE}"
+    abort_script "$_err_msg_"
+fi
+if [ "$6" ]; then
+    PUSH_TO_ARTIFACTORY=$(echo "$6" | tr '[:upper:]' '[:lower:]')
+fi
+
+MNT_LOCATION=${WORKSPACE}${MNT_LOCATION}
+
+cashRepoLocally
+mountIso
+createLocalRepo
+createDockerImage
+dockerUpdate
+shrinkImage
+
+source lib/commonFunctions.bsh
+if [ -n "${PUSH_TO_ARTIFACTORY}" ] && [ "${PUSH_TO_ARTIFACTORY}" = "deploy" ]; then
+    pushImageToArtifactory rhel
+fi
+
+set +x

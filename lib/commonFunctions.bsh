@@ -1,0 +1,88 @@
+#!/bin/bash
+# **********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# **********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2016 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property of
+# Ericsson Radio Systems AB, Sweden. The programs may be used and/or
+# copied only with the written permission from Ericsson Radio Systems AB
+# or in accordance with the terms and conditions stipulated in the
+# agreement/contract under which the program(s) have been supplied.
+#
+# **********************************************************************
+# Name    : commonFunctions.sh
+# Date    : 15/01/2016
+# Revision: R1A01
+# Purpose : Functions used by multiple scripts
+#
+# **********************************************************************
+
+# ********************************************************************
+#
+#   Main body of program
+#
+# ********************************************************************
+#
+
+set -x
+
+DATE=/usr/bin/date
+DOCKER=/usr/bin/docker
+MKDIR=/usr/bin/mkdir
+TEE=/usr/bin/tee
+TOUCH=/usr/bin/touch
+
+RUN_TIME=`$DATE +%Y-%b-%d_%H.%M.%S`
+WORKSPACE=""
+DOCKER_PREFIX=armdocker.rnd.ericsson.se/aia/base/
+DOCKER_CONFIG_LOCATION=/root/.docker/
+
+function pushImageToArtifactory {
+	
+	COMPONENT_NAME=$1
+	if [ ! -s $DOCKER_CONFIG_LOCATION ]; then
+       sudo $MKDIR -p ${DOCKER_CONFIG_LOCATION}
+		if [ $? -ne 0 ]; then
+			_err_msg_="Could not create directory ${DOCKER_CONFIG_LOCATION}"
+			abort_script "$_err_msg_"
+		fi
+    fi
+    
+    sudo cp config.json $DOCKER_CONFIG_LOCATION
+    if [ $? -ne 0 ]; then
+        _err_msg_="Failed to copy docker config to $DOCKER_CONFIG_LOCATION"
+        abort_script "$_err_msg_"
+    fi
+        
+    $DOCKER push ${DOCKER_PREFIX}${COMPONENT_NAME}
+    if [ $? -ne 0 ]; then
+        _err_msg_="Failed to push ${DOCKER_PREFIX}${COMPONENT_NAME} to artifactory"
+        abort_script "$_err_msg_"
+    fi
+}
+
+### Function: abort_script ###
+# Arguments:
+#       $1 - Error message from part of program (Not always used)
+# Return Values:
+#       none
+abort_script()
+{
+  _err_time_=`$DATE '+%Y-%b-%d_%H.%M.%S'`
+
+  if [ "$1" ]; then
+    _err_msg_="${_err_time_} - $1"
+  else
+    _err_msg_="${_err_time_} - ERROR : Script aborted......."
+  fi
+
+  if [ "${LOGFILE}" ]; then
+    $ECHO -e "ERROR : $_err_msg_" | $TEE -a ${LOGFILE}
+  else
+    $ECHO -e "ERROR : $_err_msg_"
+  fi
+}
+
+set +x
